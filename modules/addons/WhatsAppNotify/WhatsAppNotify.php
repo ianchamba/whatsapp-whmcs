@@ -83,6 +83,16 @@ function WhatsAppNotify_deactivate()
  */
 function WhatsAppNotify_output($vars)
 {
+    global $mysql_charset;
+
+    // Verificar se $mysql_charset está configurado como utf8mb4
+    if ($mysql_charset !== 'utf8mb4') {
+        echo '<div class="alert alert-danger">';
+        echo 'Atenção: A configuração <code>$mysql_charset</code> no arquivo <code>configuration.php</code> está definida como <code>' . htmlspecialchars($mysql_charset) . '</code>.';
+        echo ' Para que emojis funcionem corretamente, altere para <code>utf8mb4</code>.';
+        echo '</div>';
+    }
+    
     // Salvar templates no banco de dados ao enviar o formulário
     if ($_POST) {
         foreach ($_POST['templates'] as $event => $template) {
