@@ -16,7 +16,7 @@ function WhatsAppNotify_config()
         'description' => 'Este módulo envia notificações via WhatsApp relacionadas a faturas e eventos no WHMCS utilizando a EvolutionAPI.',
         'author' => '<a href="https://hostbraza.com.br" target="_blank" style="text-decoration:none;color:#007bff;">Hostbraza</a>',
         'language' => 'portuguese-br',
-        'version' => '1.1.1',
+        'version' => '1.1.2',
         'fields' => [
             'apiKey' => [
                 'FriendlyName' => 'API Key',
@@ -141,10 +141,19 @@ function WhatsAppNotify_output($vars)
             "Para acessar sua fatura, clique no link abaixo:\n\n" .
             "{link_fatura}\n\n" .
             "_Equipe Hostbraza_",
+        'LateInvoicePaymentReminder' => "*Fatura em Atraso* \n\n" .
+            "Olá {primeiro_nome}, tudo bem? ☺️\n\n" .
+            "Gostaríamos de lembrá-lo de que a fatura #{id_fatura}, gerada em {data_geracao}, com vencimento em {data_vencimento}, ainda está pendente. Para evitar qualquer interrupção nos seus serviços, pedimos que regularize o pagamento o quanto antes.\n" .
+            "💵 Valor: R$ {valor}\n" .
+            "💳 Método de Pagamento: {metodo_pagamento}\n" .
+            "📦 Produtos: {produtos_lista}\n\n" .
+            "Para acessar sua fatura, clique no link abaixo:\n\n" .
+            "{link_fatura}\n\n" .
+            "_Equipe Hostbraza_",
     ];
 
     // Obter templates salvos
-    $events = ['InvoiceCreation', 'InvoicePaid', 'InvoiceCancelled', 'InvoicePaymentReminder'];
+    $events = ['InvoiceCreation', 'InvoicePaid', 'InvoiceCancelled', 'InvoicePaymentReminder', 'LateInvoicePaymentReminder'];
     $templates = [];
     foreach ($events as $event) {
         $templates[$event] = Capsule::table('tbladdonwhatsapp')
