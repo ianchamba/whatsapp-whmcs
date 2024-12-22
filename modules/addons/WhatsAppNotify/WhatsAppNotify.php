@@ -16,7 +16,7 @@ function WhatsAppNotify_config()
         'description' => 'Este módulo envia notificações via WhatsApp relacionadas a faturas e eventos no WHMCS utilizando a EvolutionAPI.',
         'author' => '<a href="https://hostbraza.com.br" target="_blank" style="text-decoration:none;color:#007bff;">Hostbraza</a>',
         'language' => 'portuguese-br',
-        'version' => '1.1.0',
+        'version' => '1.1.1',
         'fields' => [
             'apiKey' => [
                 'FriendlyName' => 'API Key',
