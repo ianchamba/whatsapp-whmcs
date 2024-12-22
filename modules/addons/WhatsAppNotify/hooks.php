@@ -53,6 +53,15 @@ function getTemplate($event)
             "Para acessar sua fatura, clique no link abaixo:\n\n".
             "{link_fatura}\n\n" .
             "_Equipe Hostbraza_",
+        'LateInvoicePaymentReminder' => "*Fatura em Atraso* \n\n" .
+            "Olá {primeiro_nome}, tudo bem? ☺️\n\n" .
+            "Gostaríamos de lembrá-lo de que a fatura #{id_fatura}, gerada em {data_geracao}, com vencimento em {data_vencimento}, ainda está pendente. Para evitar qualquer interrupção nos seus serviços, pedimos que regularize o pagamento o quanto antes.\n" .
+            "💵 Valor: R$ {valor}\n" .
+            "💳 Método de Pagamento: {metodo_pagamento}\n" .
+            "📦 Produtos: {produtos_lista}\n\n" .
+            "Para acessar sua fatura, clique no link abaixo:\n\n" .
+            "{link_fatura}\n\n" .
+            "_Equipe Hostbraza_",
     ];
 
     // Busca o template na tabela `tbladdonwhatsapp`
@@ -97,7 +106,7 @@ function enviarMensagemWhatsApp($event, $invoiceData, $clientData) {
     $template = getTemplate($event);
 
     $placeholders = [
-        '{primeiro_nome}' => $clientData['firstname'],
+        '{primeiro_nome}' => trim($clientData['firstname']),
         '{id_fatura}' => $invoiceData['invoiceid'],
         '{metodo_pagamento}' => $metodoPagamento = $invoiceData['paymentmethod'] === 'openpix' 
         ? 'Pix' 
@@ -359,7 +368,13 @@ add_hook('InvoicePaymentReminder', 1, function($vars) {
     $invoiceData = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
     $clientData = localAPI('GetClientsDetails', ['clientid' => $invoiceData['userid'], 'stats' => true]);
     error_log("Hook 'InvoicePaymentReminder' ativado. Dados da Fatura: " . print_r($invoiceData, true) . " Dados do Cliente: " . print_r($clientData, true));
-    enviarMensagemWhatsApp('InvoicePaymentReminder', $invoiceData, $clientData);
+    $dueDate = $invoiceData['duedate'];
+    $currentDate = date('Y-m-d');
+    if ($currentDate > $dueDate) {
+        enviarMensagemWhatsApp('LateInvoicePaymentReminder', $invoiceData, $clientData);
+    } else {
+        enviarMensagemWhatsApp('InvoicePaymentReminder', $invoiceData, $clientData);
+    }
 });
 
 /**
