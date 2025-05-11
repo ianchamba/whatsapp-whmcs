@@ -1,425 +1,415 @@
 <?php
 
-if (!defined("WHMCS")) die("Acesso restrito.");
+if (!defined('WHMCS')) {
+    die('Access Denied');
+}
 
 use WHMCS\Database\Capsule;
 
-/**
- * Processa o número de telefone para garantir que ele siga o formato correto.
- *
- * @param string $phonenumber O número de telefone no formato original.
- * @return string O número de telefone processado.
- */
-function processarNumeroTelefone($phonenumber) {
-    // Remove caracteres '+' e '.'
-    return str_replace(['+', '.'], '', $phonenumber);
-}
-
-function getTemplate($event)
+class WhatsAppNotifier
 {
-    // Templates padrão
-    $defaultTemplates = [
-        'InvoiceCreation' => "*Fatura em Aberto* \n\n".
-            "Olá {primeiro_nome}, tudo bem? ☺️\n\n".
-            "🔖 Você possui uma fatura em aberto #{id_fatura}.\n".
-            "💵 Valor: R$ {valor}\n".
-            "💳 Método de Pagamento: {metodo_pagamento}\n".
-            "📦 Produtos: {produtos_lista}\n\n".
-            "Para acessar sua fatura, clique no link abaixo:\n\n".
-            "{link_fatura}\n\n".
-            "_Equipe Hostbraza_",
-        'InvoicePaid' => "*Fatura Paga* \n\n".
-            "Olá {primeiro_nome}, tudo bem? ☺️\n\n".
-            "✅ Sua fatura #{id_fatura} foi paga com sucesso.\n".
-            "💵 Valor: R$ {valor}\n".
-            "💳 Método de Pagamento: {metodo_pagamento}\n".
-            "📦 Produtos: {produtos_lista}\n\n".
-            "Obrigado por escolher nossos serviços! Estamos sempre à disposição. 💙" . "\n\n" .
-            "_Equipe Hostbraza_",
-        'InvoiceCancelled' => "*Fatura Cancelada* \n\n".
-            "Olá {primeiro_nome}, tudo bem? ☺️\n\n".
-            "⚠️ Informamos que a fatura #{id_fatura} foi cancelada.\n".
-            "💵 Valor: R$ {valor}\n".
-            "💳 Método de Pagamento: {metodo_pagamento}\n".
-            "📦 Produtos: {produtos_lista}\n\n".
-            "Se precisar de mais informações ou ajuda, estamos à disposição. 💙" . "\n\n" .
-            "_Equipe Hostbraza_",
-        'InvoicePaymentReminder' => "*Lembrete de Pagamento* \n\n".
-            "Olá {primeiro_nome}, tudo bem? ☺️\n\n".
-            "Esta mensagem é apenas um lembrete referente a fatura #{id_fatura} gerada em {data_geracao} com vencimento {data_vencimento}.\n".
-            "💵 Valor: R$ {valor}\n".
-            "💳 Método de Pagamento: {metodo_pagamento}\n".
-            "📦 Produtos: {produtos_lista}\n\n".
-            "Para acessar sua fatura, clique no link abaixo:\n\n".
-            "{link_fatura}\n\n" .
-            "_Equipe Hostbraza_",
-        'LateInvoicePaymentReminder' => "*Fatura em Atraso* \n\n" .
-            "Olá {primeiro_nome}, tudo bem? ☺️\n\n" .
-            "Gostaríamos de lembrá-lo de que a fatura #{id_fatura}, gerada em {data_geracao}, com vencimento em {data_vencimento}, ainda está pendente. Para evitar qualquer interrupção nos seus serviços, pedimos que regularize o pagamento o quanto antes.\n" .
-            "💵 Valor: R$ {valor}\n" .
-            "💳 Método de Pagamento: {metodo_pagamento}\n" .
-            "📦 Produtos: {produtos_lista}\n\n" .
-            "Para acessar sua fatura, clique no link abaixo:\n\n" .
-            "{link_fatura}\n\n" .
-            "_Equipe Hostbraza_",
-    ];
+    private string $apiKey;
+    private string $apiDomain;
+    private string $instance;
 
-    // Busca o template na tabela `tbladdonwhatsapp`
-    $template = Capsule::table('tbladdonwhatsapp')
-        ->where('event', $event)
-        ->value('template');
-
-    // Retorna o template encontrado ou o padrão
-    return $template ?? $defaultTemplates[$event] ?? "Template não configurado.";
-}
-
-/**
- * Envia uma mensagem no WhatsApp usando a API especificada com dados da fatura e do cliente.
- *
- * @param string $event O nome do evento (InvoiceCreation, InvoicePaid, InvoiceCancelled).
- * @param array $invoiceData Dados da fatura a serem enviados na mensagem.
- * @param array $clientData Dados do cliente a serem enviados na mensagem.
- */
-// Função de envio de mensagem no WhatsApp com link de autologin
-function enviarMensagemWhatsApp($event, $invoiceData, $clientData) {
-    
-    // Recupera as configurações do módulo
-    $settings = Capsule::table('tbladdonmodules')
-        ->where('module', 'WhatsAppNotify')
-        ->pluck('value', 'setting');
-
-    // Configurações dinâmicas
-    $apiKey = $settings['apiKey'] ?? 'default_api_key';
-    $apiDomain = $settings['apiDomain'] ?? 'api.example.com';
-    $whatsAppInstance = $settings['whatsAppInstance'] ?? 'DefaultInstance';
-
-    // URL da API
-    $url = "https://$apiDomain/message/sendText/$whatsAppInstance";
-    
-    // Processa o número de telefone
-    $number = processarNumeroTelefone($clientData['phonenumberformatted']);
-        
-    $produtos = array_map(function($item) {
-        return trim(preg_replace('/\s*\(\d{2}\/\d{2}\/\d{4} - \d{2}\/\d{2}\/\d{4}\)(.|\s)*/', '', $item['description']));
-    }, $invoiceData['items']['item']);
-    
-    $template = getTemplate($event);
-
-    $placeholders = [
-        '{primeiro_nome}' => trim($clientData['firstname']),
-        '{id_fatura}' => $invoiceData['invoiceid'],
-        '{metodo_pagamento}' => $metodoPagamento = $invoiceData['paymentmethod'] === 'openpix' 
-        ? 'Pix' 
-        : ($invoiceData['paymentmethod'] === 'mercadopago_1' 
-            ? 'MercadoPago' 
-            : ($invoiceData['paymentmethod'] === 'stripe' 
-                ? 'Cartão de Crédito/Débito' 
-                : $invoiceData['paymentmethod'])),
-        '{valor}' => number_format($invoiceData['total'], 2, ',', '.'),
-        '{data_geracao}' => DateTime::createFromFormat('Y-m-d', $invoiceData['date'])->format('d/m/Y'),
-        '{data_vencimento}' => DateTime::createFromFormat('Y-m-d', $invoiceData['duedate'])->format('d/m/Y'),
-        '{produtos_lista}' => implode(", ", $produtos),
-        '{link_fatura}' => function_exists('gerarLinkAutoLogin') 
-        ? gerarLinkAutoLogin($clientData['id'], 'clientarea', "viewinvoice.php?id={$invoiceData['invoiceid']}") 
-        : 'AutoLogin Desativado',
-    ];
-
-    // Substituir variáveis no template
-    $text = str_replace(array_keys($placeholders), array_values($placeholders), $template);
-
-    $headers = [
-        'Content-Type: application/json',
-        'apikey: ' . $apiKey
-    ];
-    $body = [
-        "number" => $number,
-        "text" => $text,
-        "linkPreview" => false
-    ];
-
-    // Log de debug - dados da mensagem
-    error_log("Preparando envio de mensagem para o evento '$event' com número '$number' e dados: " . json_encode($body));
-
-    // Inicializa o cURL
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-
-    // Execução da solicitação
-    $response = curl_exec($ch);
-    $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $error = curl_error($ch);
-
-    // Verificação e log de erro
-    if ($response === false) {
-        error_log("Erro no envio da mensagem para o evento '$event'. Erro: $error");
-    } else {
-        error_log("Mensagem enviada com sucesso para o evento '$event'. Código HTTP: $httpcode, Resposta: $response");
+    public function __construct()
+    {
+        $settings = Capsule::table('tbladdonmodules')
+            ->where('module', 'WhatsAppNotify')
+            ->pluck('value', 'setting');
+        $this->apiKey    = $settings['apiKey'] ?? '';
+        $this->apiDomain = $settings['apiDomain'] ?? '';
+        $this->instance  = $settings['whatsAppInstance'] ?? '';
     }
 
-    // Fecha o cURL
-    curl_close($ch);
-}
+    private function processPhone(string $phone): string
+    {
+        return str_replace(['+', '.'], '', $phone);
+    }
 
-function enviarMensagemPix($event, $invoiceData, $clientData) {
-    
-    // Recupera as configurações do módulo
-    $settings = Capsule::table('tbladdonmodules')
-        ->where('module', 'WhatsAppNotify')
-        ->pluck('value', 'setting');
-
-    // Configurações dinâmicas
-    $apiKey = $settings['apiKey'] ?? 'default_api_key';
-    $apiDomain = $settings['apiDomain'] ?? 'api.example.com';
-    $whatsAppInstance = $settings['whatsAppInstance'] ?? 'DefaultInstance';
-
-    // URL da API
-    $url = "https://$apiDomain/message/sendText/$whatsAppInstance";
-    
-    // Processa o número de telefone
-    $number = processarNumeroTelefone($clientData['phonenumberformatted']);
-
-    // Define o conteúdo da mensagem conforme o status da fatura
-    if ($invoiceData['paymentmethod'] === 'openpix' && $invoiceData['status'] === 'Unpaid') {
-        
-        // Tentativas para obter o brCode
-        $tentativas = 0;
-        $maxTentativas = 5;
-        $brCode = null;
-
-        while ($tentativas < $maxTentativas && !$brCode) {
-            // Busca o registro da fatura e acessa a coluna 'brCode'
-            $invoice = Capsule::table('tblinvoices')
-                ->where('id', $invoiceData['invoiceid'])
-                ->first();
-                error_log("Metadata Pix: " . print_r($invoice, true));
-            
-            if ($invoice && isset($invoice->brCode)) {
-                $brCode = $invoice->brCode;
-                error_log("brCode encontrado: $brCode");
-            } else {
-                $brCode = null;
-                error_log("brCode não encontrado na tentativa " . ($tentativas + 1) . ". Retentando em 1 segundo...");
-                sleep(1);
-            }
-
-            $tentativas++;
+    public function sendMessage(string $number, string $text, int $delay = 0): void
+    {
+        $url = "https://{$this->apiDomain}/message/sendText/{$this->instance}";
+        $payload = [
+            'number'      => $this->processPhone($number),
+            'text'        => $text,
+            'linkPreview' => false,
+        ];
+        if ($delay > 0) {
+            $payload['delay'] = $delay;
         }
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'apikey: ' . $this->apiKey],
+            CURLOPT_POSTFIELDS     => json_encode($payload),
+            CURLOPT_RETURNTRANSFER => true,
+        ]);
+        curl_exec($ch);
+        curl_close($ch);
+    }
 
-        if (!$brCode) {
-            $textPart1 = "*Código Pix Não Encontrado*";
-            error_log("Falha ao encontrar brCode após $maxTentativas tentativas.");
-        } else {
-            $textPart1 = "*Copie o código Pix abaixo para efetuar o pagamento:* 👇";
-            $textPart2 = $brCode;
-        }
+    private function getTemplate(string $event): string
+    {
+        $custom = Capsule::table('tbladdonwhatsapp')
+            ->where('event', $event)
+            ->value('template');
+        return $custom ?: '';
+    }
 
-        $headers = [
-            'Content-Type: application/json',
-            'apikey: ' . $apiKey
+    private function formatPaymentMethod(string $method): string
+    {
+        return match ($method) {
+            'openpix'         => 'Pix',
+            'mercadopago_1'   => 'MercadoPago',
+            'stripe'          => 'Cartão de Crédito/Débito',
+            default           => $method,
+        };
+    }
+
+    private function populate(string $template, array $invoice, array $client): string
+    {
+        $products = array_map(function ($item) {
+            return trim(preg_replace('/\s*\(\d{2}\/\d{2}\/\d{4}\).*/', '', $item['description']));
+        }, $invoice['items']['item']);
+
+        $placeholders = [
+            '{primeiro_nome}'    => trim($client['firstname']),
+            '{id_fatura}'        => $invoice['invoiceid'],
+            '{metodo_pagamento}' => $this->formatPaymentMethod($invoice['paymentmethod']),
+            '{valor}'            => number_format($invoice['total'], 2, ',', '.'),
+            '{data_geracao}'     => (new DateTime($invoice['date']))->format('d/m/Y'),
+            '{data_vencimento}'  => (new DateTime($invoice['duedate']))->format('d/m/Y'),
+            '{produtos_lista}'   => implode(', ', $products),
+            '{link_fatura}'      => function_exists('gerarLinkAutoLogin')
+                ? gerarLinkAutoLogin($client['id'], 'clientarea', "viewinvoice.php?id={$invoice['invoiceid']}")
+                : ''
         ];
 
-        // Função para enviar mensagens
-        $sendMessage = function($text, $additionalFields = []) use ($url, $headers, $number, $event) {
-            $body = array_merge([
-                "number" => $number,
-                "text" => $text,
-                "linkPreview" => false
-            ], $additionalFields);
+        return str_replace(array_keys($placeholders), array_values($placeholders), $template);
+    }
 
-            // Log de debug - dados da mensagem
-            error_log("Preparando envio de mensagem para o evento '$event' com número '$number' e dados: " . json_encode($body));
+    public function handleInvoiceCreation(array $vars): void
+    {
+        $inv = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
+        $cli = localAPI('GetClientsDetails', ['clientid' => $inv['userid'], 'stats' => true]);
+        $text = $this->populate($this->getTemplate('InvoiceCreation'), $inv, $cli);
+        $this->sendMessage($cli['phonenumberformatted'], $text);
+    }
 
-            // Inicializa o cURL
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, $url);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-
-            // Execução da solicitação
-            $response = curl_exec($ch);
-            $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $error = curl_error($ch);
-
-            // Verificação e log de erro
-            if ($response === false) {
-                error_log("Erro no envio da mensagem para o evento '$event'. Erro: $error");
-            } else {
-                error_log("Mensagem enviada com sucesso para o evento '$event'. Código HTTP: $httpcode, Resposta: $response");
+    public function handleOpenpixInvoiceGenerated(array $vars): void
+    {
+        $id = $vars['invoiceId'];
+        $record = Capsule::table('tblinvoices')->where('id', $id)->first();
+        if ($record->processed) {
+            return;
+        }
+        $inv = localAPI('GetInvoice', ['invoiceid' => $id]);
+        $cli = localAPI('GetClientsDetails', ['clientid' => $inv['userid'], 'stats' => true]);
+        $brCode = null;
+        for ($i = 0; $i < 5 && !$brCode; $i++) {
+            $row = Capsule::table('tblinvoices')->where('id', $id)->first();
+            $brCode = $row->brCode ?? null;
+            if (!$brCode) {
+                sleep(1);
             }
+        }
+        if ($brCode) {
+            $this->sendMessage($cli['phonenumberformatted'], "*Copie o código Pix abaixo para efetuar o pagamento:* 👇");
+            $this->sendMessage($cli['phonenumberformatted'], $brCode, 3000);
+        }
+        Capsule::table('tblinvoices')->where('id', $id)->update(['processed' => 1]);
+    }
 
-            // Fecha o cURL
-            curl_close($ch);
-        };
+    public function handleInvoicePaid(array $vars): void
+    {
+        $inv = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
+        $cli = localAPI('GetClientsDetails', ['clientid' => $inv['userid'], 'stats' => true]);
+        $text = $this->populate($this->getTemplate('InvoicePaid'), $inv, $cli);
+        $this->sendMessage($cli['phonenumberformatted'], $text);
+    }
 
-        // Enviar a primeira parte da mensagem
-        $sendMessage($textPart1);
+    public function handleInvoiceCancelled(array $vars): void
+    {
+        $inv = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
+        $cli = localAPI('GetClientsDetails', ['clientid' => $inv['userid'], 'stats' => true]);
+        $text = $this->populate($this->getTemplate('InvoiceCancelled'), $inv, $cli);
+        $this->sendMessage($cli['phonenumberformatted'], $text);
+    }
 
-        // Enviar a segunda parte da mensagem (se aplicável)
-        if (isset($textPart2)) {
-            $sendMessage($textPart2, ["delay" => 3000]);
+    public function handleInvoicePaymentReminder(array $vars): void
+    {
+        $id = $vars['invoiceid'];
+        try {
+            $block = Capsule::table('tbltransientdata')
+                ->where('name', "block_invoice_{$id}")
+                ->where('expires', '>', date('Y-m-d H:i:s'))
+                ->first();
+            if ($block) {
+                return;
+            }
+        } catch (\Throwable $e) {
+        }
+        $inv = localAPI('GetInvoice', ['invoiceid' => $id]);
+        $cli = localAPI('GetClientsDetails', ['clientid' => $inv['userid'], 'stats' => true]);
+        $event = date('Y-m-d') > $inv['duedate']
+            ? 'LateInvoicePaymentReminder'
+            : 'InvoicePaymentReminder';
+        $text = $this->populate($this->getTemplate($event), $inv, $cli);
+        $this->sendMessage($cli['phonenumberformatted'], $text);
+    }
+
+    public function handleLogTransaction(array $vars): void
+    {
+        if (isset($vars['result']) && strtolower($vars['result']) === 'declined'
+            && preg_match('/Invoice ID\s*=>\s*(\d+)/i', $vars['data'], $m)
+        ) {
+            $id = $m[1];
+            $inv = localAPI('GetInvoice', ['invoiceid' => $id]);
+            $cli = localAPI('GetClientsDetails', ['clientid' => $inv['userid'], 'stats' => true]);
+            $text = $this->populate($this->getTemplate('InvoiceDeclined'), $inv, $cli);
+            $this->sendMessage($cli['phonenumberformatted'], $text);
+            $name    = "block_invoice_{$id}";
+            $expires = date('Y-m-d H:i:s', time() + 300);
+            if (Capsule::table('tbltransientdata')->where('name', $name)->exists()) {
+                Capsule::table('tbltransientdata')
+                    ->where('name', $name)
+                    ->update(['data' => json_encode(['blocked' => true]), 'expires' => $expires]);
+            } else {
+                Capsule::table('tbltransientdata')
+                    ->insert(['name' => $name, 'data' => json_encode(['blocked' => true]), 'expires' => $expires]);
+            }
         }
     }
+
+    public function handleAffiliateWithdrawalRequest(array $vars): void
+    {
+        $affId    = $vars['affiliateId'] ?? '';
+        $userId   = $vars['userId'] ?? '';
+        $clientId = $vars['clientId'] ?? '';
+        $balance  = number_format($vars['balance'] ?? 0, 2, ',', '.');
+        $user     = Capsule::table('tblclients')->where('id', $userId)->first();
+        $name     = trim($user->firstname ?? '');
+        $email    = $user->email ?? '';
+        $phone    = $user->phonenumber ?? '';
+        $phoneFmt = $this->processPhone($phone);
+        
+        // Obter templates do banco de dados
+        $textAdmin = $this->getTemplate('AffiliateWithdrawalAdmin');
+        if (empty($textAdmin)) {
+            $textAdmin = "*Notificação de Solicitação de Retirada de Afiliado*\n\n"
+                . "🔔 Um afiliado solicitou retirada de comissão.\n"
+                . "🆔 ID do Afiliado: {affId}\n"
+                . "👤 Nome: {name}\n"
+                . "📧 E-mail: {email}\n"
+                . "👥 ID do Cliente: {clientId}\n"
+                . "💰 Saldo da Conta: R$ {balance}\n\n"
+                . "_Equipe Hostbraza_";
+        }
+
+        // Substituir placeholders
+        $placeholders = [
+            '{affId}' => $affId,
+            '{name}' => $name,
+            '{email}' => $email,
+            '{clientId}' => $clientId,
+            '{balance}' => $balance,
+        ];
+        $textAdmin = str_replace(array_keys($placeholders), array_values($placeholders), $textAdmin);
+        
+        $this->sendMessage('5561995940410', $textAdmin);
+        
+        if ($phoneFmt) {
+            $textAff = $this->getTemplate('AffiliateWithdrawalClient');
+            if (empty($textAff)) {
+                $textAff = "*Solicitação de Retirada Recebida*\n\n"
+                    . "Olá {name},\n\n"
+                    . "🔔 Recebemos sua solicitação de retirada de comissão no valor de R$ {balance}. "
+                    . "Nossa equipe está analisando e em breve você será notificado sobre o andamento.\n\n"
+                    . "_Equipe Hostbraza_";
+            }
+            
+            // Substituir placeholders
+            $textAff = str_replace(array_keys($placeholders), array_values($placeholders), $textAff);
+            
+            $this->sendMessage($phoneFmt, $textAff);
+        }
+    }
+
+    public function handleClientAdd(array $vars): void
+    {
+        $clientId = $vars['client_id'] ?? $vars['userid'] ?? null;
+        $name     = trim($vars['firstname'] ?? '');
+        $phone    = $vars['phonenumber'] ?? '';
+        $phoneFmt = $this->processPhone($phone);
+        if (!$clientId || !$phoneFmt) {
+            return;
+        }
+
+        $pdo  = Capsule::connection()->getPdo();
+        $stmt = $pdo->prepare("SELECT email_verification_token, email_verified_at FROM tblusers WHERE id = ?");
+        $stmt->execute([$clientId]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        // Obter template do banco de dados
+        $text = $this->getTemplate('ClientAdd');
+        if (empty($text)) {
+            $text = "🔔 *Bem-vindo à Hostbraza, {name}!* 🔔\n\n"
+                . "Obrigado por escolher a nossa hospedagem especializada em *WordPress*, *WooCommerce* e *VPS*.\n\n"
+                . "📲 *Salve este número* — este é nosso canal oficial para *suporte* e *notificações de pagamento*.\n\n";
+            if ($user && empty($user['email_verified_at']) && !empty($user['email_verification_token'])) {
+                $text .= "🔐 *Antes de começar, verifique sua conta clicando no link abaixo:*\n{verification_link}\n\n";
+            }
+            $text .= "_Equipe Hostbraza_";
+        }
+        
+        // Substituir placeholders
+        $verificationLink = '';
+        if ($user && empty($user['email_verified_at']) && !empty($user['email_verification_token'])) {
+            $verificationLink = "https://app.hostbraza.com.br/user/verify/{$user['email_verification_token']}";
+        }
+        
+        $placeholders = [
+            '{name}' => $name,
+            '{clientId}' => $clientId,
+            '{verification_link}' => $verificationLink,
+        ];
+        $text = str_replace(array_keys($placeholders), array_values($placeholders), $text);
+        
+        // Remover linha de verificação se não houver link
+        if (empty($verificationLink)) {
+            $text = preg_replace('/🔐.*\n\n/s', '', $text);
+        }
+        
+        $this->sendMessage($phoneFmt, $text);
+    }
+
+    /**
+     * Método para enviar mensagens em massa
+     * 
+     * @param int $campaignId ID da campanha
+     * @return void
+     */
+    public function sendBulkMessages($campaignId)
+    {
+        // Obtém os dados da campanha
+        $campaign = Capsule::table('tbladdonwhatsapp_campaigns')
+            ->where('id', $campaignId)
+            ->first();
+        
+        if (!$campaign || $campaign->status == 'completed' || $campaign->status == 'cancelled') {
+            return;
+        }
+        
+        // Atualiza o status para "processando"
+        Capsule::table('tbladdonwhatsapp_campaigns')
+            ->where('id', $campaignId)
+            ->update([
+                'status' => 'processing',
+                'updated_at' => date('Y-m-d H:i:s'),
+            ]);
+        
+        // Processa mensagens em lotes para evitar timeouts
+        $batchSize = 20;
+        $totalProcessed = 0;
+        $delay = $campaign->delay;
+        
+        // Obter todas as mensagens/templates da campanha
+        $templates = Capsule::table('tbladdonwhatsapp_campaign_templates')
+            ->where('campaign_id', $campaignId)
+            ->orderBy('id')
+            ->get();
+        
+        $templateCount = count($templates);
+        $templateIndex = 0;
+        
+        while (true) {
+            // Busca o próximo lote
+            $messages = Capsule::table('tbladdonwhatsapp_messages')
+                ->where('campaign_id', $campaignId)
+                ->where('status', 'pending')
+                ->limit($batchSize)
+                ->get();
+            
+            if (count($messages) == 0) {
+                break; // Não há mais mensagens para processar
+            }
+            
+            foreach ($messages as $index => $message) {
+                // Calcular o delay progressivo
+                $calculatedDelay = $index * $delay;
+                
+                try {
+                    // Selecionar um template para este cliente (rotação de templates)
+                    $messageText = $message->message;
+                    
+                    // Se houver múltiplos templates, usar um diferente para cada cliente
+                    if ($templateCount > 0) {
+                        // Selecionar o próximo template na sequência
+                        $template = $templates[$templateIndex % $templateCount];
+                        $messageText = $template->message;
+                        $templateIndex++;
+                    }
+                    
+                    // Envia a mensagem com o template selecionado
+                    $this->sendMessage($message->phone, $messageText, $calculatedDelay);
+                    
+                    // Atualiza o status da mensagem
+                    Capsule::table('tbladdonwhatsapp_messages')
+                        ->where('id', $message->id)
+                        ->update([
+                            'status' => 'sent',
+                            'sent_at' => date('Y-m-d H:i:s'),
+                            'updated_at' => date('Y-m-d H:i:s'),
+                        ]);
+                    
+                    $totalProcessed++;
+                } catch (\Exception $e) {
+                    // Registra o erro
+                    Capsule::table('tbladdonwhatsapp_messages')
+                        ->where('id', $message->id)
+                        ->update([
+                            'status' => 'failed',
+                            'error' => $e->getMessage(),
+                            'updated_at' => date('Y-m-d H:i:s'),
+                        ]);
+                }
+            }
+            
+            // Atualiza o progresso da campanha
+            Capsule::table('tbladdonwhatsapp_campaigns')
+                ->where('id', $campaignId)
+                ->update([
+                    'sent_count' => Capsule::raw('sent_count + ' . count($messages)),
+                    'updated_at' => date('Y-m-d H:i:s'),
+                ]);
+            
+            // Verifica se deve parar
+            if (count($messages) < $batchSize) {
+                break;
+            }
+            
+            // Pausa entre lotes para evitar sobrecarga
+            sleep(2);
+        }
+        
+        // Marca a campanha como concluída
+        Capsule::table('tbladdonwhatsapp_campaigns')
+            ->where('id', $campaignId)
+            ->update([
+                'status' => 'completed',
+                'updated_at' => date('Y-m-d H:i:s'),
+            ]);
+    }
 }
 
-function enviarMensagemWhatsAppAffiliate($number, $text) {
-    
-    // Recupera as configurações do módulo
-    $settings = Capsule::table('tbladdonmodules')
-        ->where('module', 'WhatsAppNotify')
-        ->pluck('value', 'setting');
+$notifier = new WhatsAppNotifier();
 
-    // Configurações dinâmicas
-    $apiKey = $settings['apiKey'] ?? 'default_api_key';
-    $apiDomain = $settings['apiDomain'] ?? 'api.example.com';
-    $whatsAppInstance = $settings['whatsAppInstance'] ?? 'DefaultInstance';
-
-    // URL da API
-    $url = "https://$apiDomain/message/sendText/$whatsAppInstance";
-    
-    $headers = [
-        'Content-Type: application/json',
-        'apikey: ' . $apiKey
-    ];
-    $body = [
-        "number" => $number,
-        "text" => $text,
-        "linkPreview" => false
-    ];
-
-    // Log de debug - dados da mensagem
-    error_log("Preparando envio de mensagem para número '$number' com dados: " . json_encode($body));
-
-    // Inicializa o cURL
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-
-    // Execução da solicitação
-    $response = curl_exec($ch);
-    $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $error = curl_error($ch);
-
-    // Verificação e log de erro
-    if ($response === false) {
-        error_log("Erro no envio da mensagem. Erro: $error");
-    } else {
-        error_log("Mensagem enviada com sucesso. Código HTTP: $httpcode, Resposta: $response");
-    }
-
-    // Fecha o cURL
-    curl_close($ch);
-}
-
-// Hook para InvoiceCreation
-add_hook('InvoiceCreation', 1, function($vars) {
-    $invoiceData = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
-    $clientData = localAPI('GetClientsDetails', ['clientid' => $invoiceData['userid'], 'stats' => true]);
-    error_log("Hook 'InvoiceCreation' ativado. Dados da Fatura: " . print_r($invoiceData, true) . " Dados do Cliente: " . print_r($clientData, true));
-    enviarMensagemWhatsApp('InvoiceCreation', $invoiceData, $clientData);
-});
-
-add_hook('OpenpixInvoiceGenerated', 1, function($vars) {
-    $invoiceId = $vars['invoiceId'];
-
-    // Verifica se o invoice já foi processado
-    $invoice = Capsule::table('tblinvoices')->where('id', $invoiceId)->first();
-    if ($invoice && $invoice->processed) {
-        error_log("Invoice ID $invoiceId já foi processado. Ignorando.");
-        return;
-    }
-
-    // Obtenha os dados da fatura e do cliente e envie a mensagem
-    $invoiceData = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
-    $clientData = localAPI('GetClientsDetails', ['clientid' => $invoiceData['userid'], 'stats' => true]);
-    error_log("Hook 'OpenpixInvoiceGenerated' triggered. Invoice Data: " . print_r($invoiceData, true) . " Client Data: " . print_r($clientData, true));
-    enviarMensagemPix('OpenpixInvoiceGenerated', $invoiceData, $clientData);
-
-    // Atualiza o status de processamento no banco de dados
-    Capsule::table('tblinvoices')->where('id', $invoiceId)->update(['processed' => 1]);
-});
-
-// Hook para InvoicePaid
-add_hook('InvoicePaid', 1, function($vars) {
-    $invoiceData = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
-    $clientData = localAPI('GetClientsDetails', ['clientid' => $invoiceData['userid'], 'stats' => true]);
-    error_log("Hook 'InvoicePaid' ativado. Dados da Fatura: " . print_r($invoiceData, true) . " Dados do Cliente: " . print_r($clientData, true));
-    enviarMensagemWhatsApp('InvoicePaid', $invoiceData, $clientData);
-});
-
-// Hook para InvoiceCancelled
-add_hook('InvoiceCancelled', 1, function($vars) {
-    $invoiceData = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
-    $clientData = localAPI('GetClientsDetails', ['clientid' => $invoiceData['userid'], 'stats' => true]);
-    error_log("Hook 'InvoiceCancelled' ativado. Dados da Fatura: " . print_r($invoiceData, true) . " Dados do Cliente: " . print_r($clientData, true));
-    enviarMensagemWhatsApp('InvoiceCancelled', $invoiceData, $clientData);
-});
-
-// Hook para InvoicePaymentReminder
-add_hook('InvoicePaymentReminder', 1, function($vars) {
-    $invoiceData = localAPI('GetInvoice', ['invoiceid' => $vars['invoiceid']]);
-    $clientData = localAPI('GetClientsDetails', ['clientid' => $invoiceData['userid'], 'stats' => true]);
-    error_log("Hook 'InvoicePaymentReminder' ativado. Dados da Fatura: " . print_r($invoiceData, true) . " Dados do Cliente: " . print_r($clientData, true));
-    $dueDate = $invoiceData['duedate'];
-    $currentDate = date('Y-m-d');
-    if ($currentDate > $dueDate) {
-        enviarMensagemWhatsApp('LateInvoicePaymentReminder', $invoiceData, $clientData);
-    } else {
-        enviarMensagemWhatsApp('InvoicePaymentReminder', $invoiceData, $clientData);
-    }
-});
-
-/**
- * Hook para AffiliateWithdrawalRequest para enviar notificação de solicitação de retirada.
- */
-add_hook('AffiliateWithdrawalRequest', 1, function($vars) {
-    // Log detalhado do conteúdo da variável $vars para depuração
-    error_log("Hook 'AffiliateWithdrawalRequest' ativado. Dados do Hook: " . print_r($vars, true));
-
-    $affiliateId = $vars['affiliateId'] ?? 'Desconhecido';
-    $userId = $vars['userId'] ?? 'Desconhecido';
-    $clientId = $vars['clientId'] ?? 'Desconhecido';
-    $balanceFormatado = $vars['balance'] ?? 'Desconhecido';
-    $balance = number_format($balanceFormatado, 2, ',', '.');
-
-    // Obter informações do afiliado
-    $user = Capsule::table('tblclients')->where('id', $userId)->first();
-    $firstName = $user->firstname ?? 'Nome Desconhecido';
-    $email = $user->email ?? 'E-mail Desconhecido';
-    $phoneNumber = $user->phonenumber ?? null;
-    $phoneNumberFormatted = processarNumeroTelefone($phoneNumber);
-
-    // Mensagem para o administrador
-    $adminText = "*Notificação de Solicitação de Retirada de Afiliado* \n\n" .
-                 "🔔 Um afiliado solicitou retirada de comissão.\n" .
-                 "🆔 ID do Afiliado: $affiliateId\n" .
-                 "👤 Nome: $firstName\n" .
-                 "📧 E-mail: $email\n" .
-                 "👥 ID do Cliente: $clientId\n" .
-                 "💰 Saldo da Conta: R$ $balance\n\n" .
-                 "_Equipe Hostbraza_";
-
-    // Envia a mensagem para o administrador
-    enviarMensagemWhatsAppAffiliate('5561995940410', $adminText);
-
-    // Mensagem para o afiliado, caso o número de telefone esteja disponível
-    if ($phoneNumberFormatted) {
-        $affiliateText = "*Solicitação de Retirada Recebida* \n\n" .
-                         "Olá $firstName,\n\n" .
-                         "🔔 Recebemos sua solicitação de retirada de comissão no valor de R$ $balance. " .
-                         "Nossa equipe está analisando e em breve você será notificado sobre o andamento.\n\n" .
-                         "_Equipe Hostbraza_";
-
-        enviarMensagemWhatsAppAffiliate($phoneNumberFormatted, $affiliateText);
-    } else {
-        error_log("Número de telefone não encontrado para o afiliado com ID '$affiliateId'.");
-    }
-});
+add_hook('InvoiceCreation', 1, [$notifier, 'handleInvoiceCreation']);
+add_hook('OpenpixInvoiceGenerated', 1, [$notifier, 'handleOpenpixInvoiceGenerated']);
+add_hook('InvoicePaid', 1, [$notifier, 'handleInvoicePaid']);
+add_hook('InvoiceCancelled', 1, [$notifier, 'handleInvoiceCancelled']);
+add_hook('InvoicePaymentReminder', 1, [$notifier, 'handleInvoicePaymentReminder']);
+add_hook('LogTransaction', 1, [$notifier, 'handleLogTransaction']);
+add_hook('AffiliateWithdrawalRequest', 1, [$notifier, 'handleAffiliateWithdrawalRequest']);
+add_hook('ClientAdd', 1, [$notifier, 'handleClientAdd']);

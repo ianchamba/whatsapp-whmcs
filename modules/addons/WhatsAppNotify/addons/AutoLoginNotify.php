@@ -2,7 +2,7 @@
 
 use WHMCS\Database\Capsule;
 
-function sendWhatsappMessage($phoneNumber, $firstName, $loginLink) {
+function sendWhatsappAutoLogin($phoneNumber, $firstName, $loginLink) {
     
     // Recupera as configurações do módulo
     $settings = Capsule::table('tbladdonmodules')
@@ -21,6 +21,8 @@ function sendWhatsappMessage($phoneNumber, $firstName, $loginLink) {
         'Content-Type: application/json',
         'apikey: ' . $apiKey
     ];
+    
+    $phoneNumber = str_replace(['+','.'], '', $phoneNumber);
 
     $text = "*Acesso Rápido* ️\n\n" .
         "Olá {$firstName}, tudo bem? ☺️\n\n" .
@@ -29,7 +31,7 @@ function sendWhatsappMessage($phoneNumber, $firstName, $loginLink) {
         "_Equipe Hostbraza_";
 
     $body = [
-        "number" => processarNumeroTelefone($phoneNumber),
+        "number" => $phoneNumber,
         "text" => $text,
         "linkPreview" => false
     ];
