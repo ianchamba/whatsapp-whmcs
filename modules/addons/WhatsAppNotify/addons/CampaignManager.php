@@ -151,7 +151,7 @@ function createMassCampaign($data) {
         'message' => $data['message_template'][0] ?? '', // Mantemos para compatibilidade, mas usaremos templates separados
         'filter_criteria' => json_encode($filters),
         'scheduled_at' => $scheduledAt,
-        'status' => $scheduledAt ? 'scheduled' : 'processing',
+        'status' => $scheduledAt ? 'scheduled' : 'pending', // Alterado para "pending" ao invés de "processing"
         'admin_id' => $_SESSION['adminid'],
         'delay' => (int)$data['delay'],
         'created_at' => date('Y-m-d H:i:s'),
@@ -222,9 +222,17 @@ function createMassCampaign($data) {
             'total_recipients' => $messageCount,
         ]);
     
-    // Se for envio imediato, iniciar processamento
+    // Se for envio imediato, marcar para processamento pelo cron
     if (!$scheduledAt) {
-        queueCampaignProcessing($campaignId);
+        Capsule::table('tbladdonwhatsapp_campaigns')
+            ->where('id', $campaignId)
+            ->update([
+                'status' => 'ready',
+                'updated_at' => date('Y-m-d H:i:s'),
+            ]);
+        
+        // Registrar no log que a campanha está pronta para processamento
+        logActivity("Campanha WhatsApp ID #$campaignId está pronta para processamento pelo cron");
     }
     
     return $campaignId;
@@ -250,20 +258,6 @@ function replaceMessageVariables($message, $client) {
 }
 
 /**
- * Enfileira o processamento de uma campanha
- * 
- * @param int $campaignId ID da campanha
- * @return void
- */
-function queueCampaignProcessing($campaignId) {
-    // Inicializa o notificador WhatsApp
-    $notifier = new WhatsAppNotifier();
-    
-    // Inicia o processamento da campanha
-    $notifier->sendBulkMessages($campaignId);
-}
-
-/**
  * Cancela uma campanha
  * 
  * @param int $campaignId ID da campanha
@@ -276,10 +270,30 @@ function cancelCampaign($campaignId) {
             'status' => 'cancelled',
             'updated_at' => date('Y-m-d H:i:s'),
         ]);
+    
+    logActivity("Campanha WhatsApp ID #$campaignId foi cancelada");
 }
 
 /**
- * Retoma uma campanha cancelada
+ * Pausa uma campanha em processamento
+ * 
+ * @param int $campaignId ID da campanha
+ * @return void
+ */
+function pauseCampaign($campaignId) {
+    Capsule::table('tbladdonwhatsapp_campaigns')
+        ->where('id', $campaignId)
+        ->whereIn('status', ['processing', 'ready'])
+        ->update([
+            'status' => 'paused',
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+    
+    logActivity("Campanha WhatsApp ID #$campaignId foi pausada");
+}
+
+/**
+ * Retoma uma campanha pausada ou cancelada
  * 
  * @param int $campaignId ID da campanha
  * @return void
@@ -287,13 +301,18 @@ function cancelCampaign($campaignId) {
 function resumeCampaign($campaignId) {
     $campaign = Capsule::table('tbladdonwhatsapp_campaigns')
         ->where('id', $campaignId)
+        ->whereIn('status', ['paused', 'cancelled'])
         ->first();
     
     if (!$campaign) {
         return;
     }
     
-    $status = 'processing';
+    // Se não foi enviada nenhuma mensagem, status é "ready"
+    // Caso contrário, é "processing"
+    $status = $campaign->sent_count > 0 ? 'processing' : 'ready';
+    
+    // Se há agendamento futuro, mantém como "scheduled"
     if ($campaign->scheduled_at && strtotime($campaign->scheduled_at) > time()) {
         $status = 'scheduled';
     }
@@ -305,7 +324,32 @@ function resumeCampaign($campaignId) {
             'updated_at' => date('Y-m-d H:i:s'),
         ]);
     
-    if ($status == 'processing') {
-        queueCampaignProcessing($campaignId);
+    logActivity("Campanha WhatsApp ID #$campaignId foi retomada, novo status: $status");
+}
+
+/**
+ * Inicia uma campanha manualmente
+ * 
+ * @param int $campaignId ID da campanha
+ * @return void
+ */
+function startCampaign($campaignId) {
+    $campaign = Capsule::table('tbladdonwhatsapp_campaigns')
+        ->where('id', $campaignId)
+        ->whereIn('status', ['draft', 'pending', 'paused', 'cancelled', 'scheduled'])
+        ->first();
+    
+    if (!$campaign) {
+        return;
     }
+    
+    Capsule::table('tbladdonwhatsapp_campaigns')
+        ->where('id', $campaignId)
+        ->update([
+            'status' => 'ready',
+            'scheduled_at' => null, // Anula o agendamento se existir
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+    
+    logActivity("Campanha WhatsApp ID #$campaignId foi iniciada manualmente");
 }
