@@ -18,7 +18,7 @@ function WhatsAppNotify_config()
         'description' => 'Este módulo envia notificações via WhatsApp relacionadas a faturas e eventos no WHMCS utilizando a EvolutionAPI.',
         'author' => '<a href="https://hostbraza.com.br" target="_blank" style="text-decoration:none;color:#007bff;">Hostbraza</a>',
         'language' => 'portuguese-br',
-        'version' => '1.3.0',
+        'version' => '1.4.0',
         'fields' => [
             'apiKey' => [
                 'FriendlyName' => 'API Key',
@@ -41,6 +41,26 @@ function WhatsAppNotify_config()
                 'Description' => 'Informe o identificador da instância (ex: Hostbraza).',
                 'Default' => 'Hostbraza.com.br',
             ],
+            'maxMessagesPerCron' => [
+                'FriendlyName' => 'Mensagens por execução do cron',
+                'Type' => 'text',
+                'Size' => '4',
+                'Description' => 'Quantidade máxima de mensagens processadas por cada execução do cron.',
+                'Default' => '50',
+            ],
+            'cronInterval' => [
+                'FriendlyName' => 'Intervalo do cron (minutos)',
+                'Type' => 'dropdown',
+                'Options' => [
+                    '5' => '5 minutos',
+                    '10' => '10 minutos',
+                    '15' => '15 minutos',
+                    '30' => '30 minutos',
+                    '60' => '1 hora',
+                ],
+                'Description' => 'Configure a frequência de execução do cron no seu sistema operacional para coincidir com este valor.',
+                'Default' => '5',
+            ],
         ],
     ];
 }
@@ -62,19 +82,79 @@ function WhatsAppNotify_activate()
         });
     }
 
-    // Criar tabela para campanhas de envio em massa
-    if (!Capsule::schema()->hasTable('tbladdonwhatsapp_campaigns')) {
+    // Alterar campos nas tabelas existentes para adicionar novos status
+    if (Capsule::schema()->hasTable('tbladdonwhatsapp_campaigns')) {
+        // Alterar o tipo enum para incluir os novos status (paused, ready)
+        try {
+            Capsule::statement("ALTER TABLE tbladdonwhatsapp_campaigns MODIFY COLUMN status ENUM('draft', 'pending', 'ready', 'scheduled', 'processing', 'paused', 'completed', 'cancelled') DEFAULT 'draft'");
+        } catch (\Exception $e) {
+            // Se falhar, tente recriar a tabela como alternativa
+            // Neste caso, precisamos fazer backup dos dados primeiro
+            $campaigns = [];
+            if (Capsule::schema()->hasTable('tbladdonwhatsapp_campaigns')) {
+                $campaigns = Capsule::table('tbladdonwhatsapp_campaigns')->get()->toArray();
+            }
+            
+            // Recria a tabela com os novos campos e opções
+            Capsule::schema()->dropIfExists('tbladdonwhatsapp_campaigns');
+            
+            Capsule::schema()->create('tbladdonwhatsapp_campaigns', function ($table) {
+                $table->id();
+                $table->string('name', 255); // Nome da campanha
+                $table->text('message'); // Mensagem/template (mantido para compatibilidade)
+                $table->text('filter_criteria')->nullable(); // Critérios de filtro em JSON
+                $table->dateTime('scheduled_at')->nullable(); // Data/hora agendada
+                $table->enum('status', ['draft', 'pending', 'ready', 'scheduled', 'processing', 'paused', 'completed', 'cancelled'])->default('draft');
+                $table->integer('total_recipients')->default(0);
+                $table->integer('sent_count')->default(0);
+                $table->integer('admin_id'); // Admin que criou a campanha
+                $table->integer('delay')->default(1000); // Delay entre mensagens (ms)
+                $table->dateTime('last_processed_at')->nullable(); // Última vez que foi processada
+                $table->text('process_log')->nullable(); // Log de processamento
+                $table->timestamps();
+                $table->charset = 'utf8mb4'; // Suporte a emojis
+                $table->collation = 'utf8mb4_unicode_ci'; // Suporte a emojis
+            });
+            
+            // Restaura os dados
+            foreach ($campaigns as $campaign) {
+                $campaign = (array)$campaign;
+                
+                // Converter o status antigo para o novo formato
+                if (!isset($campaign['status']) || $campaign['status'] == 'draft') {
+                    $campaign['status'] = 'draft';
+                } elseif ($campaign['status'] == 'scheduled' && $campaign['scheduled_at'] > date('Y-m-d H:i:s')) {
+                    $campaign['status'] = 'scheduled';
+                } elseif ($campaign['status'] == 'processing' && $campaign['sent_count'] < $campaign['total_recipients']) {
+                    $campaign['status'] = 'processing';
+                } elseif ($campaign['status'] == 'completed' || $campaign['sent_count'] >= $campaign['total_recipients']) {
+                    $campaign['status'] = 'completed';
+                } elseif ($campaign['status'] == 'cancelled') {
+                    $campaign['status'] = 'cancelled';
+                }
+                
+                // Adicionar campos novos
+                $campaign['last_processed_at'] = $campaign['updated_at'] ?? null;
+                $campaign['process_log'] = null;
+                
+                Capsule::table('tbladdonwhatsapp_campaigns')->insert($campaign);
+            }
+        }
+    } else {
+        // Criar tabela para campanhas de envio em massa
         Capsule::schema()->create('tbladdonwhatsapp_campaigns', function ($table) {
             $table->id();
             $table->string('name', 255); // Nome da campanha
             $table->text('message'); // Mensagem/template (mantido para compatibilidade)
             $table->text('filter_criteria')->nullable(); // Critérios de filtro em JSON
             $table->dateTime('scheduled_at')->nullable(); // Data/hora agendada
-            $table->enum('status', ['draft', 'scheduled', 'processing', 'completed', 'cancelled'])->default('draft');
+            $table->enum('status', ['draft', 'pending', 'ready', 'scheduled', 'processing', 'paused', 'completed', 'cancelled'])->default('draft');
             $table->integer('total_recipients')->default(0);
             $table->integer('sent_count')->default(0);
             $table->integer('admin_id'); // Admin que criou a campanha
             $table->integer('delay')->default(1000); // Delay entre mensagens (ms)
+            $table->dateTime('last_processed_at')->nullable(); // Última vez que foi processada
+            $table->text('process_log')->nullable(); // Log de processamento
             $table->timestamps();
             $table->charset = 'utf8mb4'; // Suporte a emojis
             $table->collation = 'utf8mb4_unicode_ci'; // Suporte a emojis
@@ -183,6 +263,13 @@ function WhatsAppNotify_activate()
             . "📲 *Salve este número* — este é nosso canal oficial para *suporte* e *notificações de pagamento*.\n\n"
             . "🔐 *Antes de começar, verifique sua conta clicando no link abaixo:*\n{verification_link}\n\n"
             . "_Equipe Hostbraza_",
+        'TwoFactorAuth' => "🔐 *Código de Autenticação 2FA*\n\n"
+            . "Olá {primeiro_nome},\n\n"
+            . "Seu código de autenticação de dois fatores é:\n\n"
+            . "*{auth_code}*\n\n"
+            . "⏰ Este código expira em alguns minutos.\n"
+            . "🔒 Use-o para concluir sua autenticação.\n\n"
+            . "_Equipe Hostbraza_",
     ];
 
     // Inserir templates padrão
@@ -213,36 +300,6 @@ function WhatsAppNotify_deactivate()
         'status' => 'success',
         'description' => 'O módulo WhatsAppNotify foi desativado.',
     ];
-}
-
-/**
- * Processa campanhas agendadas no cron
- */
-function WhatsAppNotify_cron()
-{
-    // Processar campanhas agendadas que já chegaram ao horário
-    $scheduledCampaigns = Capsule::table('tbladdonwhatsapp_campaigns')
-        ->where('status', 'scheduled')
-        ->where('scheduled_at', '<=', date('Y-m-d H:i:s'))
-        ->get();
-    
-    foreach ($scheduledCampaigns as $campaign) {
-        // Inicializa o notificador WhatsApp
-        $notifier = new WhatsAppNotifier();
-        $notifier->sendBulkMessages($campaign->id);
-    }
-    
-    // Retomar campanhas interrompidas
-    $processingStalledCampaigns = Capsule::table('tbladdonwhatsapp_campaigns')
-        ->where('status', 'processing')
-        ->where('updated_at', '<', date('Y-m-d H:i:s', strtotime('-30 minutes')))
-        ->get();
-    
-    foreach ($processingStalledCampaigns as $campaign) {
-        // Inicializa o notificador WhatsApp
-        $notifier = new WhatsAppNotifier();
-        $notifier->sendBulkMessages($campaign->id);
-    }
 }
 
 /**
@@ -375,13 +432,20 @@ function outputTemplatesTab($vars)
             "📲 *Salve este número* — este é nosso canal oficial para *suporte* e *notificações de pagamento*.\n\n" .
             "🔐 *Antes de começar, verifique sua conta clicando no link abaixo:*\n{verification_link}\n\n" .
             "_Equipe Hostbraza_",
+        'TwoFactorAuth' => "🔐 *Código de Autenticação 2FA*\n\n"
+            . "Olá {primeiro_nome},\n\n"
+            . "Seu código de autenticação de dois fatores é:\n\n"
+            . "*{auth_code}*\n\n"
+            . "⏰ Este código expira em alguns minutos.\n"
+            . "🔒 Use-o para concluir sua autenticação.\n\n"
+            . "_Equipe Hostbraza_",
     ];
 
     // Obter templates salvos
     $events = [
         'InvoiceCreation', 'InvoicePaid', 'InvoiceCancelled', 
         'InvoicePaymentReminder', 'LateInvoicePaymentReminder', 'InvoiceDeclined',
-        'AffiliateWithdrawalAdmin', 'AffiliateWithdrawalClient', 'ClientAdd'
+        'AffiliateWithdrawalAdmin', 'AffiliateWithdrawalClient', 'ClientAdd', 'TwoFactorAuth'
     ];
     
     $templates = [];
@@ -419,6 +483,7 @@ function outputTemplatesTab($vars)
     echo '<li><code>{data_geracao}</code> - Data de geração da fatura</li>';
     echo '<li><code>{data_vencimento}</code> - Data de vencimento da fatura</li>';
     echo '<li><code>{produtos_lista}</code> - Lista de produtos</li>';
+    echo '<li><code>{adicionais_lista}</code> - Lista de adicionais</li>';
     echo '<li><code>{link_fatura}</code> - Link da fatura</li>';
     echo '</ul>';
     
@@ -436,6 +501,7 @@ function outputTemplatesTab($vars)
     echo '<li><code>{name}</code> - Nome do cliente</li>';
     echo '<li><code>{clientId}</code> - ID do cliente</li>';
     echo '<li><code>{verification_link}</code> - Link de verificação da conta</li>';
+    echo '<li><code>{auth_code}</code> - Código de 2 Fatores</li>';
     echo '</ul>';
     echo '</div>';
     echo '</div>';
@@ -501,7 +567,7 @@ function outputTemplatesTab($vars)
     echo '<div id="collapseOthers" class="panel-collapse collapse" role="tabpanel" aria-labelledby="headingOthers">';
     echo '<div class="panel-body">';
     
-    $otherEvents = ['ClientAdd'];
+    $otherEvents = ['ClientAdd', 'TwoFactorAuth'];
     foreach ($otherEvents as $event) {
         echo '<div class="form-group">';
         echo '<label for="template_' . $event . '">' . ucfirst($event) . '</label>';
@@ -843,6 +909,12 @@ function outputCampaignsTab() {
         } elseif ($_GET['action'] == 'resume' && isset($_GET['id'])) {
             resumeCampaign($_GET['id']);
             echo '<div class="alert alert-success">Campanha retomada com sucesso.</div>';
+        } elseif ($_GET['action'] == 'pause' && isset($_GET['id'])) {
+            pauseCampaign($_GET['id']);
+            echo '<div class="alert alert-success">Campanha pausada com sucesso.</div>';
+        } elseif ($_GET['action'] == 'start' && isset($_GET['id'])) {
+            startCampaign($_GET['id']);
+            echo '<div class="alert alert-success">Campanha iniciada com sucesso. O processamento será realizado pelo cron.</div>';
         }
     }
     
@@ -853,6 +925,12 @@ function outputCampaignsTab() {
                 <h3 class="panel-title">Campanhas de Envio em Massa</h3>
             </div>
             <div class="panel-body">
+                <p>
+                    <a href="?module=WhatsAppNotify&tab=mass_send" class="btn btn-success">
+                        <i class="fa fa-plus"></i> Nova Campanha
+                    </a>
+                </p>
+                
                 <table class="table table-bordered table-hover">
                     <thead>
                         <tr>
@@ -862,6 +940,7 @@ function outputCampaignsTab() {
                             <th>Progresso</th>
                             <th>Agendado para</th>
                             <th>Criado em</th>
+                            <th>Atualizado em</th>
                             <th>Ações</th>
                         </tr>
                     </thead>
@@ -877,46 +956,125 @@ function outputCampaignsTab() {
                                 : 0;
                             
                             $statusClass = '';
+                            $statusText = ucfirst($campaign->status);
+                            
                             switch ($campaign->status) {
-                                case 'draft': $statusClass = 'default'; break;
-                                case 'scheduled': $statusClass = 'info'; break;
-                                case 'processing': $statusClass = 'warning'; break;
-                                case 'completed': $statusClass = 'success'; break;
-                                case 'cancelled': $statusClass = 'danger'; break;
+                                case 'draft': 
+                                    $statusClass = 'default'; 
+                                    $statusText = 'Rascunho';
+                                    break;
+                                case 'pending': 
+                                    $statusClass = 'info'; 
+                                    $statusText = 'Pendente';
+                                    break;
+                                case 'ready': 
+                                    $statusClass = 'primary'; 
+                                    $statusText = 'Pronto';
+                                    break;
+                                case 'scheduled': 
+                                    $statusClass = 'info'; 
+                                    $statusText = 'Agendado';
+                                    break;
+                                case 'processing': 
+                                    $statusClass = 'warning'; 
+                                    $statusText = 'Em Processamento';
+                                    break;
+                                case 'paused': 
+                                    $statusClass = 'default'; 
+                                    $statusText = 'Pausado';
+                                    break;
+                                case 'completed': 
+                                    $statusClass = 'success'; 
+                                    $statusText = 'Concluído';
+                                    break;
+                                case 'cancelled': 
+                                    $statusClass = 'danger'; 
+                                    $statusText = 'Cancelado';
+                                    break;
                             }
                             
                             echo '<tr>';
                             echo '<td>' . $campaign->id . '</td>';
                             echo '<td>' . htmlspecialchars($campaign->name) . '</td>';
-                            echo '<td><span class="label label-' . $statusClass . '">' . ucfirst($campaign->status) . '</span></td>';
+                            echo '<td><span class="label label-' . $statusClass . '">' . $statusText . '</span></td>';
                             echo '<td>';
                             echo '<div class="progress">';
-                            echo '<div class="progress-bar" role="progressbar" style="width: ' . $progress . '%;">';
+                            echo '<div class="progress-bar progress-bar-' . ($campaign->status == 'cancelled' ? 'danger' : 'success') . '" role="progressbar" style="width: ' . $progress . '%;">';
                             echo $campaign->sent_count . '/' . $campaign->total_recipients . ' (' . $progress . '%)';
                             echo '</div>';
                             echo '</div>';
                             echo '</td>';
                             echo '<td>' . ($campaign->scheduled_at ? date('d/m/Y H:i', strtotime($campaign->scheduled_at)) : 'Imediato') . '</td>';
                             echo '<td>' . date('d/m/Y H:i', strtotime($campaign->created_at)) . '</td>';
-                            echo '<td>';
+                            echo '<td>' . date('d/m/Y H:i', strtotime($campaign->updated_at)) . '</td>';
+                            echo '<td class="text-center">';
                             
-                            if ($campaign->status == 'scheduled' || $campaign->status == 'draft') {
-                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaign->id . '" class="btn btn-sm btn-danger">Cancelar</a> ';
+                            // Ações com base no status atual
+                            if (in_array($campaign->status, ['draft', 'pending', 'ready', 'scheduled'])) {
+                                echo '<div class="btn-group" role="group">';
+                                // Iniciar campanha (se rascunho, pendente ou agendada)
+                                if (in_array($campaign->status, ['draft', 'pending', 'scheduled'])) {
+                                    echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=start&id=' . $campaign->id . '" class="btn btn-xs btn-success" title="Iniciar processamento"><i class="fa fa-play"></i></a> ';
+                                }
+                                
+                                // Cancelar qualquer campanha que não esteja finalizada
+                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaign->id . '" class="btn btn-xs btn-danger" title="Cancelar campanha" onclick="return confirm(\'Tem certeza que deseja cancelar esta campanha?\');"><i class="fa fa-times"></i></a> ';
+                                echo '</div> ';
+                            } elseif ($campaign->status == 'processing') {
+                                echo '<div class="btn-group" role="group">';
+                                // Pausar campanha em processamento
+                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=pause&id=' . $campaign->id . '" class="btn btn-xs btn-warning" title="Pausar processamento"><i class="fa fa-pause"></i></a> ';
+                                
+                                // Cancelar campanha em processamento
+                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaign->id . '" class="btn btn-xs btn-danger" title="Cancelar campanha" onclick="return confirm(\'Tem certeza que deseja cancelar esta campanha?\');"><i class="fa fa-times"></i></a> ';
+                                echo '</div> ';
+                            } elseif ($campaign->status == 'paused') {
+                                echo '<div class="btn-group" role="group">';
+                                // Retomar campanha pausada
+                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=resume&id=' . $campaign->id . '" class="btn btn-xs btn-success" title="Retomar processamento"><i class="fa fa-play"></i></a> ';
+                                
+                                // Cancelar campanha pausada
+                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaign->id . '" class="btn btn-xs btn-danger" title="Cancelar campanha" onclick="return confirm(\'Tem certeza que deseja cancelar esta campanha?\');"><i class="fa fa-times"></i></a> ';
+                                echo '</div> ';
                             } elseif ($campaign->status == 'cancelled' && $campaign->sent_count < $campaign->total_recipients) {
-                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=resume&id=' . $campaign->id . '" class="btn btn-sm btn-success">Retomar</a> ';
+                                // Retomar campanha cancelada
+                                echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=resume&id=' . $campaign->id . '" class="btn btn-xs btn-success" title="Retomar campanha"><i class="fa fa-play"></i></a> ';
                             }
                             
-                            echo '<a href="?module=WhatsAppNotify&tab=campaign_details&id=' . $campaign->id . '" class="btn btn-sm btn-info">Detalhes</a>';
+                            // Detalhes disponíveis para qualquer status
+                            echo '<a href="?module=WhatsAppNotify&tab=campaign_details&id=' . $campaign->id . '" class="btn btn-xs btn-info" title="Ver detalhes"><i class="fa fa-search"></i> Detalhes</a>';
+                            
                             echo '</td>';
                             echo '</tr>';
                         }
                         
                         if (count($campaigns) == 0) {
-                            echo '<tr><td colspan="7" class="text-center">Nenhuma campanha encontrada</td></tr>';
+                            echo '<tr><td colspan="8" class="text-center">Nenhuma campanha encontrada</td></tr>';
                         }
                         ?>
                     </tbody>
                 </table>
+                
+                <div class="panel panel-info">
+                    <div class="panel-heading">
+                        <h3 class="panel-title">Informações sobre Status</h3>
+                    </div>
+                    <div class="panel-body">
+                        <ul>
+                            <li><span class="label label-default">Rascunho</span> - Campanha criada mas ainda não iniciada</li>
+                            <li><span class="label label-info">Pendente</span> - Campanha em preparação para processamento</li>
+                            <li><span class="label label-primary">Pronto</span> - Campanha preparada e aguardando processamento pelo cron</li>
+                            <li><span class="label label-info">Agendado</span> - Campanha agendada para envio futuro</li>
+                            <li><span class="label label-warning">Em Processamento</span> - Campanha sendo processada pelo cron</li>
+                            <li><span class="label label-default">Pausado</span> - Campanha temporariamente pausada</li>
+                            <li><span class="label label-success">Concluído</span> - Todas as mensagens foram enviadas</li>
+                            <li><span class="label label-danger">Cancelado</span> - Campanha foi cancelada manualmente</li>
+                        </ul>
+                        <div class="alert alert-info">
+                            <i class="fa fa-info-circle"></i> O processamento de campanhas é feito automaticamente pelo cron do WHMCS. Certifique-se de que o cron está configurado corretamente no seu servidor.
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -986,14 +1144,43 @@ function outputCampaignDetailsTab($campaignId) {
                                 <td>
                                     <?php 
                                     $statusClass = '';
+                                    $statusText = ucfirst($campaign->status);
+                                    
                                     switch ($campaign->status) {
-                                        case 'draft': $statusClass = 'default'; break;
-                                        case 'scheduled': $statusClass = 'info'; break;
-                                        case 'processing': $statusClass = 'warning'; break;
-                                        case 'completed': $statusClass = 'success'; break;
-                                        case 'cancelled': $statusClass = 'danger'; break;
+                                        case 'draft': 
+                                            $statusClass = 'default'; 
+                                            $statusText = 'Rascunho';
+                                            break;
+                                        case 'pending': 
+                                            $statusClass = 'info'; 
+                                            $statusText = 'Pendente';
+                                            break;
+                                        case 'ready': 
+                                            $statusClass = 'primary'; 
+                                            $statusText = 'Pronto';
+                                            break;
+                                        case 'scheduled': 
+                                            $statusClass = 'info'; 
+                                            $statusText = 'Agendado';
+                                            break;
+                                        case 'processing': 
+                                            $statusClass = 'warning'; 
+                                            $statusText = 'Em Processamento';
+                                            break;
+                                        case 'paused': 
+                                            $statusClass = 'default'; 
+                                            $statusText = 'Pausado';
+                                            break;
+                                        case 'completed': 
+                                            $statusClass = 'success'; 
+                                            $statusText = 'Concluído';
+                                            break;
+                                        case 'cancelled': 
+                                            $statusClass = 'danger'; 
+                                            $statusText = 'Cancelado';
+                                            break;
                                     }
-                                    echo '<span class="label label-' . $statusClass . '">' . ucfirst($campaign->status) . '</span>';
+                                    echo '<span class="label label-' . $statusClass . '">' . $statusText . '</span>';
                                     ?>
                                 </td>
                             </tr>
@@ -1208,10 +1395,30 @@ function outputCampaignDetailsTab($campaignId) {
                     <a href="?module=WhatsAppNotify&tab=campaigns" class="btn btn-default">Voltar para Campanhas</a>
                     
                     <?php
-                    if ($campaign->status == 'scheduled' || $campaign->status == 'draft') {
-                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaignId . '" class="btn btn-danger" onclick="return confirm(\'Tem certeza que deseja cancelar esta campanha?\')">Cancelar Campanha</a>';
+                    // Botões de ação com base no status atual da campanha
+                    if (in_array($campaign->status, ['draft', 'pending', 'ready', 'scheduled'])) {
+                        // Iniciar campanha (se rascunho, pendente ou agendada)
+                        if (in_array($campaign->status, ['draft', 'pending', 'scheduled'])) {
+                            echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=start&id=' . $campaignId . '" class="btn btn-success" title="Iniciar processamento"><i class="fa fa-play"></i> Iniciar Campanha</a> ';
+                        }
+                        
+                        // Cancelar qualquer campanha que não esteja finalizada
+                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaignId . '" class="btn btn-danger" title="Cancelar campanha" onclick="return confirm(\'Tem certeza que deseja cancelar esta campanha?\');"><i class="fa fa-times"></i> Cancelar Campanha</a>';
+                    } elseif ($campaign->status == 'processing') {
+                        // Pausar campanha em processamento
+                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=pause&id=' . $campaignId . '" class="btn btn-warning" title="Pausar processamento"><i class="fa fa-pause"></i> Pausar Campanha</a> ';
+                        
+                        // Cancelar campanha em processamento
+                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaignId . '" class="btn btn-danger" title="Cancelar campanha" onclick="return confirm(\'Tem certeza que deseja cancelar esta campanha?\');"><i class="fa fa-times"></i> Cancelar Campanha</a>';
+                    } elseif ($campaign->status == 'paused') {
+                        // Retomar campanha pausada
+                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=resume&id=' . $campaignId . '" class="btn btn-success" title="Retomar processamento"><i class="fa fa-play"></i> Retomar Campanha</a> ';
+                        
+                        // Cancelar campanha pausada
+                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=cancel&id=' . $campaignId . '" class="btn btn-danger" title="Cancelar campanha" onclick="return confirm(\'Tem certeza que deseja cancelar esta campanha?\');"><i class="fa fa-times"></i> Cancelar Campanha</a>';
                     } elseif ($campaign->status == 'cancelled' && $campaign->sent_count < $campaign->total_recipients) {
-                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=resume&id=' . $campaignId . '" class="btn btn-success">Retomar Campanha</a>';
+                        // Retomar campanha cancelada
+                        echo '<a href="?module=WhatsAppNotify&tab=campaigns&action=resume&id=' . $campaignId . '" class="btn btn-success" title="Retomar campanha"><i class="fa fa-play"></i> Retomar Campanha</a>';
                     }
                     ?>
                 </div>
